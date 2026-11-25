@@ -4,6 +4,47 @@ namespace GameServer.Gateway.Tests;
 
 static class IncomingDamagingAilmentTestCases
 {
+    public static void MokouAllowsAPhysicalHitToIgnite()
+    {
+        var ring = Assert.IsType<Item>(new UniqueCatalog(Program.Items).Create("Mokou's Embrace", new Random(17)));
+        uint mod = Program.Items.Mods.ById("AllDamageTakenCanIgniteUnique__1")!.Hash;
+        var ignite = Assert.Single(ring.Mods, m => m.Hash == mod);
+        foreach (var (equipped, critical) in new[] { (true, true), (true, false), (false, true) })
+        {
+            using var fixture = new TriggeredSummonTests.Fixture();
+            var player = fixture.Player;
+            Game.ItemsOf(player).Add(PlayerInventories.Ring1, 0, 0, ring with { Mods = equipped ? [ignite] : [] });
+            using var sources = GameEvents.PlayerStatSources.Add("Game", (owner, stats) =>
+            {
+                if (ReferenceEquals(owner, player)) stats[Stat.CannotEvade] = 1;
+                return stats;
+            });
+            Game.RecomputePoolsAndSpeed(player);
+            player.IncomingHitRandom = critical ? new LowerRoll() : new UpperRoll();
+            const double now = 1;
+            const uint id = 900;
+            var monster = new SpawnedMonster("physical ignite source", new(102, 100, 0), 0, 0, 1000)
+                { ObjectId = id, Hostile = true };
+            player.Area.Monsters[id] = monster;
+            var attack = new MonsterAttack(0x3188, 1, 8, DamagePacket.Of(DamageType.Physical, 100, 100));
+            var hit = Assert.IsType<Game.MonsterHitOutcome>(Game.CommitMonsterHitLocked(
+                player, id, monster, attack, now, (100, 100), (102, 100), checkRange: true));
+            Assert.Equal(critical, hit.Critical);
+            Assert.False(hit.Blocked);
+            Assert.True(hit.Damage > 0);
+            Assert.Equal(equipped && critical ? 117 : 0,
+                player.ElementalAilments.Magnitude(PlayerElementalAilments.Kind.Ignite, now), 6);
+            Assert.False(player.ElementalAilments.Snapshot(now + 4).Ignite);
+        }
+    }
+
+    sealed class LowerRoll : Random
+    {
+        public override double NextDouble() => 0;
+        public override int Next(int minValue, int maxValue) => minValue;
+        public override int Next(int maxValue) => 0;
+    }
+
     sealed class UpperRoll : Random
     {
         public override double NextDouble() => 0.999999;
