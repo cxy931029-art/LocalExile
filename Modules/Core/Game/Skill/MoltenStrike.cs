@@ -416,7 +416,11 @@ public static partial class Game
                 if (global::Stat.BaseKilledMonsterDroppedItemRarityPlusPct is var rarityKey)
                     m.KilledWithItemRarityPct = skillStats.GetValueOrDefault(rarityKey);
                 SoulEaterHit(player, m);
-                if (hit.Life == 0) DevourOnKill(player, m, skillStats);
+                if (hit.Life == 0)
+                {
+                    DevourOnKill(player, m, skillStats);
+                    CaptureAttackKillExplosionLocked(m, playerStats);
+                }
                 AilmentsOnHitLocked(player, id, m, mitigated, spell: false, critical, multiplier, playerStats, skillStats, now,
                     AreaRng(player), reflected: reflected, poison: poison, sourceSkill: skillId,
                     blind: BlindHitInput.Capture(playerStats, skillStats),
