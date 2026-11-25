@@ -1,4 +1,5 @@
 using GameServer.Core.Projectiles;
+using GameServer.Core.Protocol.Instance;
 using GameServer.Core.World;
 using Xunit.Abstractions;
 
@@ -6,6 +7,93 @@ namespace GameServer.Gateway.Tests;
 
 public sealed class PlacedSupportsTests(ITestOutputHelper output)
 {
+    [Fact]
+    public async Task Kongmings_Stratagem_creates_fog_only_when_a_paid_trap_triggers()
+    {
+        var shield = Assert.IsType<Item>(new UniqueCatalog(Program.Items).Create("Kongming's Stratagem", new Random(6)));
+        var mod = Program.Items.Mods.ById("CreateSmokeCloudWhenTrapTriggeredUnique__1")!;
+        void Equip(Player player) => Game.ItemsOf(player).Add(PlayerInventories.Offhand1, 0, 0,
+            shield with { Mods = [new(ModSection.Explicit, mod.Hash, [20])] });
+        var enemy = await PlacedContact("Fire Trap", null, true, Equip);
+        Assert.True(enemy.Damage > 0);
+        Assert.Equal(3, enemy.FogSeconds, 6);
+        Assert.Equal(3, (await PlacedContact("Fire Trap", null, false, Equip, skitter: true)).FogSeconds, 6);
+        Assert.Equal(0, (await PlacedContact("Fire Trap", null, false, Equip)).FogSeconds);
+        Assert.Equal(0, (await PlacedContact("Fire Trap", null, true, null)).FogSeconds);
+    }
+
+    static async Task<(uint Damage, bool Surge, double FogSeconds)> PlacedContact(string name, string? support, bool enemy,
+        Action<Player>? setup, bool skitter = false)
+    {
+        var clock = new PlacedClock();
+        using var fixture = new TriggeredSummonTests.Fixture(clock);
+        var player = fixture.Player;
+        player.ProjectileRuntimeState = fixture.Session;
+        player.Walk.Teleport(100, 100, clock.At);
+        var items = Game.ItemsOf(player);
+        uint weapon = Assert.Single(items.Items(PlayerInventories.Weapon1)).Id;
+        items.Change(PlayerInventories.Weapon1, weapon, _ => ItemCatalog.Create(Program.Items.Find("Driftwood Wand")!));
+        var gems = new List<(string, int)> { (name, 18) };
+        if (support is not null) gems.Add((support, 18));
+        if (skitter) gems.Add(("Summon Skitterbots", 18));
+        ushort skill = fixture.Equip(gems.ToArray())[0];
+        setup?.Invoke(player);
+        var previous = Game.AreaUpdateContext.Value;
+        Game.AreaUpdateContext.Value = new(fixture.Lifetime, clock);
+        try
+        {
+            Game.RecomputePoolsAndSpeed(player);
+            if (skitter)
+            {
+                var aura = Game.GemSkillEffects(player).Single(g => Program.Skills.EffectId(g.Effect) == "SummonSkitterbots");
+                Assert.True(await Game.ToggleAura(player, aura.Id, aura.Effect, aura.Name,
+                    Game.SupportedReservationCost(player, aura.Id)!.Value, aura.Level, aura.Quality));
+                await Game.PlayerMinionsTick(player, clock.At);
+                Assert.NotEmpty(player.Reservations.Fighters);
+            }
+            int unreservedBefore = Game.UnreservedMana(player);
+            if (support is not null) player.PlayerMana = (uint)unreservedBefore;
+            uint mana = player.PlayerMana;
+            Assert.True(await Game.CastGemSkill(player, skill, (100, 100), (112, 100)));
+            var placed = Assert.Single(player.Placed.All.Values);
+            Assert.True(player.PlayerMana < mana || placed.Mine && Game.UnreservedMana(player) < unreservedBefore,
+                $"{name} with {support}: mana {mana}→{player.PlayerMana}, unreserved {unreservedBefore}→{Game.UnreservedMana(player)}");
+            Assert.False(player.SupportGems.ArcaneSurgeActiveAt(clock.At));
+            Assert.Empty(player.FlaskGrounds.Grounds);
+            const uint id = 915;
+            var at = (X: placed.At.X + 5, Y: placed.At.Y);
+            var target = new SpawnedMonster("placed skill witness", new(at.X, at.Y, 0), 0, 0, 100000)
+                { ObjectId = id, Hostile = true };
+            if (enemy)
+            {
+                player.Area.Monsters.Add(id, target);
+                player.Area.Grid.Set(new(id), at);
+            }
+            clock.At = enemy || placed.Mine || skitter ? placed.Armed + .01 : placed.Until + .01;
+            if (skitter)
+                foreach (var fighter in player.Reservations.Fighters.Values)
+                    fighter.Monster.Walk.Teleport(placed.At.X, placed.At.Y, clock.At);
+            if (placed.Mine && !skitter) Game.DetonateMinesLocked(player, clock.At);
+            await Game.PlayerMinionsTick(player, clock.At);
+            double atTrigger = clock.At;
+            clock.At += .50;
+            fixture.Session.AdvanceTo(Math.Max(fixture.Session.Runtime.Now, ProjectileRuntime.Time(clock.At)));
+            if (placed.Mine && skitter) Assert.True(Assert.Single(player.Placed.All.Values).SkitterTriggered);
+            else Assert.Empty(player.Placed.All);
+            var fog = player.FlaskGrounds.Grounds.SingleOrDefault();
+            if (fog is not null)
+            {
+                Assert.Equal(FlaskGrounds.Kind.SmokeCloud, fog.Kind);
+                Assert.True(player.FlaskGrounds.Covers(FlaskGrounds.Kind.SmokeCloud, at));
+                Assert.Empty(player.FlaskGrounds.Expire(fog.Ends - .01));
+                Assert.Same(fog, Assert.Single(player.FlaskGrounds.Expire(fog.Ends)));
+            }
+            return (target.MaxLife - target.Life, player.SupportGems.ArcaneSurgeActiveAt(clock.At),
+                fog is null ? 0 : fog.Ends - atTrigger);
+        }
+        finally { Game.AreaUpdateContext.Value = previous; }
+    }
+
     [Fact]
     public async Task Locus_keeps_close_mines_armed_while_the_rest_of_the_sequence_fires()
     {
